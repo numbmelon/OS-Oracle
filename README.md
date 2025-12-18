@@ -25,8 +25,9 @@ Follow the steps below to use **OS-Critic Bench**.
 Clone the dataset from Hugging Face and rename it:
 
 ```bash
+cd os-critic-bench
 git clone https://huggingface.co/datasets/OS-Copilot/OS-Critic-Bench
-cd OS-Critic-Bench
+
 
 mv OS-Critic-Bench test_jsonl
 ```
