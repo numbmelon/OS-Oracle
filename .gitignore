@@ -1,0 +1,14 @@
+data/
+tmp/
+
+
+__pycache__/
+*.pyc
+*.log
+
+*bashrc*
+tmp/
+Qwen2.5-VL/
+results/
+test_jsonl/
+images/
