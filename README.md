@@ -47,4 +47,12 @@ python cal_acc.py --jsonl <your_output_file_path>
 ```
 
 ## Citation
-Coming soon.
+If you find this repository helpful, feel free to cite our paper:
+```bibtex
+@article{wu2025osoracle,
+        title={OS-Oracle: A Comprehensive Framework for Cross-Platform GUI Critic Models},
+        author={Zhenyu Wu and Jingjing Xie and Zehao Li and Bowen Yang and Qiushi Sun and Zhaoyang Liu and Zhoumianze Liu and Yu Qiao and Xiangyu Yue and Zun Wang and Zichen Ding},
+        journal={arXiv preprint arXiv:2512.16295},
+        year={2025}
+      }
+```
