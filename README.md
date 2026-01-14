@@ -27,7 +27,7 @@ Clone the dataset from Hugging Face and rename it:
 ```bash
 cd os-critic-bench
 git clone https://huggingface.co/datasets/OS-Copilot/OS-Critic-Bench
-
+git lfs pull
 
 mv OS-Critic-Bench test_jsonl
 ```
