@@ -30,13 +30,13 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--desktop_jsonl", default=f"test_jsonl/desktop.jsonl")
 
     p.add_argument(
-        "--critic_backend", choices=["oai", "qwen"], default="oai",
+        "--critic_backend", choices=["oai", "qwen2_5-vl", "qwen3-vl"], default="oai",
         help="Critic backend: OpenAI GPT-4o (default) or local Qwen."
     )
     p.add_argument(
         "--critic_model_path",
         default="Qwen2.5-VL-7B-Instruct",
-        help="Critic model path (used only when --critic_backend=qwen)."
+        help="Critic model path (not used  when --critic_backend=oai)."
     )
     p.add_argument(
         "--results_root",
@@ -176,13 +176,13 @@ def init_predictor(args):
         return None
     from inferencer import Qwen25VLBaseInferencer, OaiInferencer, Qwen3VLBaseInferencer
 
-    if args.critic_backend == "qwen":
+    if args.critic_backend in ["qwen2_5-vl", "qwen3-vl"]:
         critic_model_path = os.environ.get("CRITIC_MODEL_PATH", args.critic_model_path)
         os.environ.setdefault("CRITIC_MODEL_PATH", critic_model_path)
-        os.environ.setdefault("CRITIC_BACKEND", "qwen")
-        if "qwen3-vl" not in critic_model_path.lower():
+        os.environ.setdefault("CRITIC_BACKEND", args.critic_backend)
+        if args.critic_backend == "qwen2_5-vl":
             return Qwen25VLBaseInferencer(critic_model_path)
-        else:
+        elif args.critic_backend == "qwen3-vl":
             return Qwen3VLBaseInferencer(critic_model_path)
     else:
         # You can change the default model name here if needed.
@@ -311,7 +311,7 @@ def main():
         ep_id = ex.get("episode_id")
         try:
             # Build critic_messages from the new raw-format fields (image, history, etc.)
-            messages = build_critic_messages(ex)
+            messages = build_critic_messages(ex, model_type=args.critic_backend)
 
             critic_result = model.predict(messages)
 
@@ -400,7 +400,7 @@ def main():
             for ex in tqdm(missing_examples, desc="Rank0 late-fix critic"):
                 ep_id = ex.get("episode_id")
                 try:
-                    messages = build_critic_messages(ex)
+                    messages = build_critic_messages(ex, model_type=args.critic_backend)
                     critic_result = model.predict(messages)
                     orig_pred = ex.get("orig_prediction")
                     late_rows.append(

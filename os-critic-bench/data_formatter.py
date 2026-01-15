@@ -27,6 +27,9 @@ import os
 import math
 from typing import Dict, Any, List, Tuple, Optional
 import re
+import ast
+import json
+import warnings
 
 from PIL import Image 
 
@@ -121,7 +124,7 @@ def _build_action_history_block(history_actions: List[str]) -> str:
         return "None"
     lines: List[str] = []
     for idx, act in enumerate(history_actions, start=1):
-        act_str = (act or "").strip()
+        act_str = (act or "").strip().strip(';"')
         lines.append(f"Step {idx}: {act_str}")
     return "\n".join(lines)
 
@@ -151,10 +154,116 @@ def _get_resized_resolution_from_image(image_abs: str, fallback: Tuple[int, int]
         # If anything goes wrong, just fall back
         return fallback
 
+def _parse_action_str(s: str) -> Dict[str, Any]:
+    """
+    Parse an action string into a dict.
+    Supports:
+      - JSON dict string
+      - Python-literal dict string (single quotes)
+      - Strings with a trailing quote (common in some logs)
+    """
+    s = s.strip().strip(';"')
+
+    # e.g. "{'a': 1}'" or "{'a': 1}\""
+    if (s.endswith('"') and (s.count("{") == s.count("}"))):
+        # try to strip only the last quote if it looks dangling
+        s2 = s[:-1].rstrip()
+        # only keep if it ends with '}' (a dict)
+        if s2.endswith("}"):
+            s = s2
+
+    # 1) Try JSON first
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    # 2) Try python literal eval (for "{'name': 'mobile_use', ...}")
+    try:
+        obj = ast.literal_eval(s)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    raise ValueError(f"Cannot parse action string: {s[:120]}...")
+
+
+def _scale_coords_in_action(action: Dict[str, Any], resized_width: int, resized_height: int) -> Dict[str, Any]:
+    """
+    Convert coordinate / coordinate2 from pixel [w, h] to [w/W*1000, h/H*1000].
+    """
+    if not isinstance(resized_width, int) or not isinstance(resized_height, int) or resized_width <= 0 or resized_height <= 0:
+        raise ValueError("resized_width and resized_height must be positive integers.")
+
+    args = action.get("arguments")
+    if not isinstance(args, dict):
+        return action
+
+    def _convert(key: str) -> None:
+        v = args.get(key)
+        if (
+            isinstance(v, (list, tuple))
+            and len(v) == 2
+            and isinstance(v[0], (int, float))
+            and isinstance(v[1], (int, float))
+        ):
+            x, y = v
+            nx = int(round(x / resized_width * 1000))
+            ny = int(round(y / resized_height * 1000))
+            args[key] = [nx, ny]
+
+    _convert("coordinate")
+    _convert("coordinate2")
+    return action
+
+
+def normalize_actions_qwen3vl(
+    history_actions: List[str],
+    current_action: str,
+    resized_width: int,
+    resized_height: int,
+) -> Tuple[List[str], str]:
+    """
+    Parse history_actions/current_action, normalize coordinates, and return updated strings.
+    - history_actions: returned as JSON strings (if parsed successfully)
+                      otherwise keep original string and emit a warning.
+    - current_action: returned as JSON string (if parsed successfully)
+                      otherwise keep original string and emit a warning.
+    """
+    new_history: List[str] = []
+
+    for i, s in enumerate(history_actions):
+        try:
+            d = _parse_action_str(s)
+            d = _scale_coords_in_action(d, resized_width, resized_height)
+            new_history.append(json.dumps(d, ensure_ascii=False))
+        except Exception as e:
+            warnings.warn(
+                f"[normalize_actions_qwen3vl] Failed to parse/normalize history_actions[{i}]. "
+                f"Keeping original. Error: {type(e).__name__}: {e}"
+            )
+            new_history.append(s)
+
+    try:
+        cur = _parse_action_str(current_action)
+        cur = _scale_coords_in_action(cur, resized_width, resized_height)
+        new_current = json.dumps(cur, ensure_ascii=False)
+    except Exception as e:
+        warnings.warn(
+            f"[normalize_actions_qwen3vl] Failed to parse/normalize current_action. "
+            f"Keeping original. Error: {type(e).__name__}: {e}"
+        )
+        new_current = current_action
+
+    return new_history, new_current
+
 
 # ===================== Mobile (mobile_use) =====================
 
-def build_critic_messages_for_mobile(example: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_critic_messages_for_mobile(example: Dict[str, Any], model_type=None) -> List[Dict[str, Any]]:
     """
     Build critic_messages for mobile (mobile_use) examples,
     following the original template structure.
@@ -171,6 +280,10 @@ def build_critic_messages_for_mobile(example: Dict[str, Any]) -> List[Dict[str, 
     # Resolution: compute from actual image via smart_resize
     # Fallback for mobile if the image cannot be opened
     rw, rh = _get_resized_resolution_from_image(image_abs, fallback=(924, 2100))
+    input_w, input_h = rw, rh
+    if model_type == "qwen3-vl":
+        history_actions, current_action = normalize_actions_qwen3vl(history_actions, current_action, rw, rh)
+        input_w, input_h = 1000, 1000
 
     # Common critic description header
     header = (
@@ -194,7 +307,7 @@ def build_critic_messages_for_mobile(example: Dict[str, Any]) -> List[Dict[str, 
         "    \"description\": \"Use a touchscreen to interact with a mobile device, and take screenshots.\\n"
         "* This is an interface to a mobile device with touchscreen. You can perform actions like clicking, typing, swiping, etc.\\n"
         "* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.\\n"
-        f"* The screen's resolution is {rw}x{rh}.\\n"
+        f"* The screen's resolution is {input_w}x{input_h}.\\n"
         "* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges.\", \n"
         "    \"parameters\": {\n"
         "      \"properties\": {\n"
@@ -300,7 +413,7 @@ def build_critic_messages_for_mobile(example: Dict[str, Any]) -> List[Dict[str, 
 
 # ===================== Desktop / Web (computer_use) =====================
 
-def build_critic_messages_for_desktop(example: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_critic_messages_for_desktop(example: Dict[str, Any], model_type=None) -> List[Dict[str, Any]]:
     """
     Build critic_messages for desktop (computer_use) examples,
     following the original template structure.
@@ -316,6 +429,10 @@ def build_critic_messages_for_desktop(example: Dict[str, Any]) -> List[Dict[str,
     # Resolution: compute from actual image via smart_resize
     # Fallback for desktop/web if the image cannot be opened
     rw, rh = _get_resized_resolution_from_image(image_abs, fallback=(1176, 784))
+    input_w, input_h = rw, rh
+    if model_type == "qwen3-vl":
+        history_actions, current_action = normalize_actions_qwen3vl(history_actions, current_action, rw, rh)
+        input_w, input_h = 1000, 1000
 
     # Common critic description header (same as mobile)
     header = (
@@ -341,7 +458,7 @@ def build_critic_messages_for_desktop(example: Dict[str, Any]) -> List[Dict[str,
         "You must click on desktop icons to start applications.\\n"
         "* Some applications may take time to start or process actions, so you may need to wait and take successive "
         "screenshots to see the results of your actions.\\n"
-        f"* The screen's resolution is {rw}x{rh}.\\n"
+        f"* The screen's resolution is {input_w}x{input_h}.\\n"
         "* Whenever you intend to move the cursor to click on an element like an icon, you should consult a screenshot "
         "to determine the coordinates of the element before moving the cursor.\\n"
         "* If you tried clicking on a program or link but it failed to load, even after waiting, try adjusting your "
@@ -433,14 +550,14 @@ def build_critic_messages_for_desktop(example: Dict[str, Any]) -> List[Dict[str,
     return messages
 
 
-def build_critic_messages_for_web(example: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_critic_messages_for_web(example: Dict[str, Any], model_type=None) -> List[Dict[str, Any]]:
     """
     Build critic_messages for web examples.
 
     Web uses the same action space (computer_use) and overall structure as desktop,
     so we simply delegate to build_critic_messages_for_desktop.
     """
-    return build_critic_messages_for_desktop(example)
+    return build_critic_messages_for_desktop(example, model_type=None)
 
 
 
@@ -644,50 +761,21 @@ def build_critic_messages_for_gui_critic_r1(example: Dict[str, Any]) -> List[Dic
     ]
 
 
-def build_critic_messages(example: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Unified entry: choose the appropriate builder according to example['domain'].
-    """
-    fmt_hint = _lower(
-        example.get("critic_format")
-        or example.get("critic_style")
-        or example.get("prompt_format")
-        or example.get("template")
-        or example.get("format")
-        or example.get("model_family")
-    )
-    domain = _lower(example.get("domain"))
-
-    if domain in {"gui_critic_r1", "gui-critic-r1"} or fmt_hint in {"gui_critic_r1", "gui-critic-r1", "gui critic r1"}:
-        return build_critic_messages_for_gui_critic_r1(example)
-
-    if domain == "desktop":
-        return build_critic_messages_for_desktop(example)
-    elif domain == "mobile":
-        return build_critic_messages_for_mobile(example)
-    elif domain == "web":
-        return build_critic_messages_for_web(example)
-    else:
-        raise ValueError(
-            f"Unknown domain for example: {example.get('domain')}, episode_id={example.get('episode_id')}"
-        )
-
-
 
 # ===================== Unified entry =====================
 
-def build_critic_messages(example: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_critic_messages(example: Dict[str, Any], model_type=None) -> List[Dict[str, Any]]:
     """
     Unified entry: choose the appropriate builder according to example['domain'].
     """
     domain = example.get("domain")
     # return build_critic_messages_for_gui_critic_r1(example)
     if domain == "desktop":
-        return build_critic_messages_for_desktop(example)
+        return build_critic_messages_for_desktop(example, model_type)
     elif domain == "mobile":
-        return build_critic_messages_for_mobile(example)
+        return build_critic_messages_for_mobile(example, model_type)
     elif domain == "web":
-        return build_critic_messages_for_web(example)
+        return build_critic_messages_for_web(example, model_type)
     else:
         raise ValueError(
             f"Unknown domain for example: {domain}, episode_id={example.get('episode_id')}"

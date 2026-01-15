@@ -16,7 +16,8 @@ torchrun \
   --master_addr=${MASTER_ADDR} \
   --master_port=29613 \
   eval_bench.py \
-  --critic_backend qwen \
+  --critic_backend qwen3-vl \
   --critic_model_path "$CRITIC_MODEL_PATH"
 
-# set 'critic_backend' to 'oai' if testing gpt or claude 
+# qwen2_5-vl, qwen3-vl
+# set 'critic_backend' to 'oai' if testing gpt or claude
